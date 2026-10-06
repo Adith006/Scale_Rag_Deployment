@@ -4,3 +4,4 @@ langsmith
 logfire
 logfire[fastapi]
 dotenv
+tiktoken
