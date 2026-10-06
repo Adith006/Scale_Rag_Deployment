@@ -30,22 +30,27 @@ def initialize_logfire():
     """
     Initialize Logfire once and reuse it across Streamlit reruns.
     """
+    token = os.getenv("LOGFIRE_TOKEN")
+    if not token:
+        return "Not configured: LOGFIRE_TOKEN is missing"
+
     try:
-        token = os.getenv("LOGFIRE_TOKEN")
-
-        if not token:
-            return "LOGFIRE_TOKEN not configured"
-
         logfire.configure(
             token=token,
             service_name="rag-ui",
         )
-        logfire.instrument_requests()
-
-        return "Connected & Tracing"
-
     except Exception as e:
-        return f"Standby: {e}"
+        return f"Standby: Logfire setup failed ({type(e).__name__})"
+
+    try:
+        logfire.instrument_requests()
+    except Exception as e:
+        return (
+            "Logfire connected; HTTP request tracing unavailable "
+            f"({type(e).__name__}: {e})"
+        )
+
+    return "Connected & Tracing"
 
 
 @st.cache_resource
@@ -147,9 +152,10 @@ with st.sidebar:
 
     st.markdown("---")
 
-    st.success(
-        f"Logfire: {LOGFIRE_STATUS}"
-    )
+    if LOGFIRE_STATUS == "Connected & Tracing":
+        st.success("Logfire: Tracing and connected")
+    else:
+        st.warning(f"Logfire: {LOGFIRE_STATUS}")
 
     st.info(
         f"Memory ID: {st.session_state.session_id[:8]}"
