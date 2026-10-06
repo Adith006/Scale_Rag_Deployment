@@ -5,3 +5,4 @@ logfire
 logfire[fastapi]
 dotenv
 tiktoken
+logfire[requests]
