@@ -5,6 +5,7 @@ import uuid
 import logfire
 import requests
 import streamlit as st
+import tiktoken
 
 from dotenv import load_dotenv
 
@@ -75,6 +76,13 @@ st.set_page_config(
 
 AI_AVATAR = "🤖"
 USER_AVATAR = "👤"
+MAX_QUERY_TOKENS = 2500
+TOKEN_ENCODING = tiktoken.get_encoding("o200k_harmony")
+
+
+def count_tokens(text: str) -> int:
+    """Count query tokens using the GPT-OSS tokenizer."""
+    return len(TOKEN_ENCODING.encode(text, disallowed_special=()))
 
 
 def render_sources(sources):
@@ -197,12 +205,21 @@ for message in st.session_state.messages:
 # ============================================================
 
 if prompt := st.chat_input(
-    "Ask a research question..."
+    "Ask a research question on kubernetes..."
 ):
+
+    query_token_count = count_tokens(prompt)
+    if query_token_count > MAX_QUERY_TOKENS:
+        st.warning(
+            f"Your query is {query_token_count:,} tokens. "
+            f"Please shorten it to {MAX_QUERY_TOKENS:,} tokens or fewer."
+        )
+        st.stop()
 
     with logfire.span(
         "User Research Interaction",
         user_query=prompt,
+        query_tokens=query_token_count,
         conversation_id=st.session_state.session_id
     ):
 
