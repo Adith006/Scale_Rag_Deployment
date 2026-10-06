@@ -3,3 +3,4 @@ streamlit
 langsmith
 logfire
 logfire[fastapi]
+dotenv
