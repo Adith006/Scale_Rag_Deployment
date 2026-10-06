@@ -36,7 +36,11 @@ def initialize_logfire():
         if not token:
             return "LOGFIRE_TOKEN not configured"
 
-        logfire.configure(token=token)
+        logfire.configure(
+            token=token,
+            service_name="rag-ui",
+        )
+        logfire.instrument_requests()
 
         return "Connected & Tracing"
 
@@ -90,21 +94,28 @@ def render_sources(sources):
     if not sources:
         return
 
-    with st.expander(f"Retrieved research documents ({len(sources)})"):
-        for i, source in enumerate(sources):
-            if isinstance(source, dict):
-                source_name = str(source.get("source") or "Unknown document")
-                source_text = str(source.get("content") or source.get("text") or "")
-                score = source.get("score")
-            else:
-                source_name = "Retrieved chunk"
-                source_text = str(source)
-                score = None
+    with logfire.span("Render Retrieved Sources", source_count=len(sources)):
+        with st.expander(f"Retrieved research documents ({len(sources)})"):
+            for i, source in enumerate(sources):
+                if isinstance(source, dict):
+                    source_name = str(source.get("source") or "Unknown document")
+                    source_text = str(source.get("content") or source.get("text") or "")
+                    score = source.get("score")
+                else:
+                    source_name = "Retrieved chunk"
+                    source_text = str(source)
+                    score = None
 
-            with st.expander(f"{i + 1}. {source_name}"):
-                if isinstance(score, (int, float)):
-                    st.caption(f"Vector similarity: {score:.3f}")
-                st.write(source_text)
+                with logfire.span(
+                    "Render Retrieved Source",
+                    source_index=i + 1,
+                    has_score=isinstance(score, (int, float)),
+                    content_characters=len(source_text),
+                ):
+                    with st.expander(f"{i + 1}. {source_name}"):
+                        if isinstance(score, (int, float)):
+                            st.caption(f"Vector similarity: {score:.3f}")
+                        st.write(source_text)
 
 
 # ============================================================
@@ -115,10 +126,11 @@ if "session_id" not in st.session_state:
 
     st.session_state.session_id = str(uuid.uuid4())
 
-    logfire.info(
-        "New research session created",
-        conversation_id=st.session_state.session_id
-    )
+    with logfire.span("Create Research Session"):
+        logfire.info(
+            "New research session created",
+            conversation_id=st.session_state.session_id
+        )
 
 
 if "messages" not in st.session_state:
@@ -151,16 +163,18 @@ with st.sidebar:
         type="primary"
     ):
 
-        logfire.info(
-            "Research memory cleared",
-            conversation_id=st.session_state.session_id
-        )
+        with logfire.span(
+            "Clear Research History",
+            conversation_id=st.session_state.session_id,
+            cleared_message_count=len(st.session_state.messages),
+        ):
+            st.session_state.messages = []
 
-        st.session_state.messages = []
+            st.session_state.session_id = str(
+                uuid.uuid4()
+            )
 
-        st.session_state.session_id = str(
-            uuid.uuid4()
-        )
+            logfire.info("Research session reset")
 
         st.rerun()
 
@@ -181,23 +195,25 @@ st.caption(
 # DISPLAY CHAT HISTORY
 # ============================================================
 
-for message in st.session_state.messages:
+with logfire.span(
+    "Render Chat History",
+    message_count=len(st.session_state.messages),
+    conversation_id=st.session_state.session_id,
+):
+    for index, message in enumerate(st.session_state.messages):
+        role = message["role"]
+        avatar = AI_AVATAR if role == "assistant" else USER_AVATAR
 
-    avatar = (
-        AI_AVATAR
-        if message["role"] == "assistant"
-        else USER_AVATAR
-    )
-
-    with st.chat_message(
-        message["role"],
-        avatar=avatar
-    ):
-        st.markdown(
-            message["content"]
-        )
-        if message["role"] == "assistant":
-            render_sources(message.get("sources", []))
+        with logfire.span(
+            "Render Chat Message",
+            message_index=index,
+            role=role,
+            content_characters=len(message["content"]),
+        ):
+            with st.chat_message(role, avatar=avatar):
+                st.markdown(message["content"])
+                if role == "assistant":
+                    render_sources(message.get("sources", []))
 
 
 # ============================================================
@@ -209,16 +225,21 @@ if prompt := st.chat_input(
 ):
 
     query_token_count = count_tokens(prompt)
-    if query_token_count > MAX_QUERY_TOKENS:
-        st.warning(
-            f"Your query is {query_token_count:,} tokens. "
-            f"Please shorten it to {MAX_QUERY_TOKENS:,} tokens or fewer."
-        )
-        st.stop()
+    with logfire.span(
+        "Validate User Query",
+        query_tokens=query_token_count,
+        query_token_limit=MAX_QUERY_TOKENS,
+        accepted=query_token_count <= MAX_QUERY_TOKENS,
+    ):
+        if query_token_count > MAX_QUERY_TOKENS:
+            st.warning(
+                f"Your query is {query_token_count:,} tokens. "
+                f"Please shorten it to {MAX_QUERY_TOKENS:,} tokens or fewer."
+            )
+            st.stop()
 
     with logfire.span(
         "User Research Interaction",
-        user_query=prompt,
         query_tokens=query_token_count,
         conversation_id=st.session_state.session_id
     ):
@@ -227,18 +248,20 @@ if prompt := st.chat_input(
         # Store user message
         # ----------------------------------------------------
 
-        st.session_state.messages.append(
-            {
-                "role": "user",
-                "content": prompt
-            }
-        )
+        with logfire.span("Store User Message", content_characters=len(prompt)):
+            st.session_state.messages.append(
+                {
+                    "role": "user",
+                    "content": prompt
+                }
+            )
 
-        with st.chat_message(
-            "user",
-            avatar=USER_AVATAR
-        ):
-            st.markdown(prompt)
+        with logfire.span("Render Current User Message"):
+            with st.chat_message(
+                "user",
+                avatar=USER_AVATAR
+            ):
+                st.markdown(prompt)
 
 
         # ----------------------------------------------------
@@ -262,8 +285,10 @@ if prompt := st.chat_input(
                     # ============================================
 
                     with logfire.span(
-                        "Calling Research Agent Backend"
-                    ):
+                        "Calling Research Agent Backend",
+                        backend_url=BACKEND_URL,
+                        timeout_seconds=60,
+                    ) as backend_span:
 
                         url = f"{BACKEND_URL}/query"
 
@@ -283,45 +308,62 @@ if prompt := st.chat_input(
                         response.raise_for_status()
 
                         data = response.json()
+                        backend_span.set_attribute(
+                            "http.status_code",
+                            response.status_code,
+                        )
+                        backend_span.set_attribute(
+                            "response.content_length",
+                            len(response.content),
+                        )
 
 
                     # ============================================
                     # AGENT PLAN
                     # ============================================
 
-                    steps = data.get(
-                        "thought_process",
-                        []
-                    )
+                    with logfire.span("Parse Backend Response"):
+                        steps = data.get(
+                            "thought_process",
+                            []
+                        )
+                        sources = data.get(
+                            "sources",
+                            []
+                        )
+                        logfire.info(
+                            "Backend response parsed",
+                            plan_step_count=len(steps),
+                            source_count=len(sources),
+                            answer_characters=len(data.get("answer", "")),
+                            backend_status=data.get("status", "unknown"),
+                        )
 
                     if steps:
 
-                        st.markdown(
-                            "**Agent Process**"
-                        )
-
-                        for step in steps:
-
-                            st.write(
-                                f"⚙️ {step}"
-                            )
-
-
-                    sources = data.get(
-                        "sources",
-                        []
-                    )
+                        with logfire.span(
+                            "Render Agent Plan",
+                            step_count=len(steps),
+                        ):
+                            st.markdown("**Agent Process**")
+                            for step_index, step in enumerate(steps):
+                                with logfire.span(
+                                    "Render Agent Plan Step",
+                                    step_index=step_index,
+                                ):
+                                    st.write(f"⚙️ {step}")
 
 
                     # ============================================
                     # STATUS
                     # ============================================
 
-                    status.update(
-                        label="✅ Research completed",
-                        state="complete",
-                        expanded=False
-                    )
+                    with logfire.span("Update Research Status", state="complete"):
+                        status.update(
+                            label="✅ Research completed",
+                            state="complete",
+                            expanded=False
+                        )
 
 
                 # ================================================
@@ -396,52 +438,58 @@ if prompt := st.chat_input(
             # FINAL ANSWER
             # ====================================================
 
-            answer_placeholder = st.empty()
-
-            full_answer = data.get(
-                "answer",
-                "No response generated."
-            )
-
-            # Simple streaming effect
-            current_text = ""
-
-            for char in full_answer:
-
-                current_text += char
-
-                answer_placeholder.markdown(
-                    current_text + "▌"
+            with logfire.span("Prepare Final Answer"):
+                answer_placeholder = st.empty()
+                full_answer = data.get(
+                    "answer",
+                    "No response generated."
                 )
+                answer_character_count = len(full_answer)
 
-                time.sleep(0.005)
+            with logfire.span(
+                "Stream Answer to UI",
+                answer_characters=answer_character_count,
+            ):
+                current_text = ""
+                for char in full_answer:
+                    current_text += char
+                    answer_placeholder.markdown(
+                        current_text + "▌"
+                    )
+                    time.sleep(0.005)
 
-            answer_placeholder.markdown(
-                full_answer
-            )
+                answer_placeholder.markdown(full_answer)
 
             if sources:
                 render_sources(sources)
             elif not any("Skipped" in str(step) for step in steps):
-                if any("Retrieval Failed" in str(step) for step in steps):
-                    st.warning("Qdrant retrieval failed; this answer has no retrieved source documents.")
-                else:
-                    st.info("No Qdrant source documents were returned for this answer.")
+                with logfire.span("Render Empty Retrieval Notice"):
+                    if any("Retrieval Failed" in str(step) for step in steps):
+                        st.warning("Qdrant retrieval failed; this answer has no retrieved source documents.")
+                    else:
+                        st.info("No Qdrant source documents were returned for this answer.")
 
 
             # ====================================================
             # SAVE ASSISTANT RESPONSE
             # ====================================================
 
-            st.session_state.messages.append(
-                {
-                    "role": "assistant",
-                    "content": full_answer,
-                    "sources": sources,
-                }
-            )
+            with logfire.span(
+                "Store Assistant Response",
+                answer_characters=answer_character_count,
+                source_count=len(sources),
+            ):
+                st.session_state.messages.append(
+                    {
+                        "role": "assistant",
+                        "content": full_answer,
+                        "sources": sources,
+                    }
+                )
 
             logfire.info(
                 "Research cycle completed",
-                conversation_id=st.session_state.session_id
+                conversation_id=st.session_state.session_id,
+                answer_characters=answer_character_count,
+                source_count=len(sources),
             )
